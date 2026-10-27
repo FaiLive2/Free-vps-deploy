@@ -25,12 +25,10 @@ BOT_NAME = os.getenv('BOT_NAME', 'FaiLive2 Cloud')
 PREFIX = os.getenv('PREFIX', '2vps-')
 YOUR_SERVER_IP = os.getenv('YOUR_SERVER_IP', '127.0.0.1')
 
-# ---- Public IP detection (used for SSH login info shown to users) ----
+# ---- Public IP detection ----
 _cached_public_ip = None
 
 def get_public_ip() -> str:
-    """Fetch the server's public IP via ifconfig.me, caching the result.
-    Falls back to YOUR_SERVER_IP env var if the lookup fails."""
     global _cached_public_ip
     if _cached_public_ip:
         return _cached_public_ip
@@ -45,12 +43,12 @@ def get_public_ip() -> str:
     return YOUR_SERVER_IP
 
 _raw_main_admin_ids = os.getenv('MAIN_ADMIN_ID', '1405866008127864852')
-MAIN_ADMIN_IDS_ENV = [uid.strip() for uid in _raw_main_admin_ids.split(',') if uid.strip()]
+MAIN_ADMIN_IDS_ENV = [str(uid).strip() for uid in _raw_main_admin_ids.split(',') if str(uid).strip()]
 MAIN_ADMIN_ID = int(MAIN_ADMIN_IDS_ENV[0])
 VPS_USER_ROLE_ID = int(os.getenv('VPS_USER_ROLE_ID', '1210291131301101618'))
 FREE_VPS_ROLE_ID = int(os.getenv('FREE_VPS_ROLE_ID', '0'))
 DEFAULT_STORAGE_POOL = os.getenv('DEFAULT_STORAGE_POOL', 'default')
-BOT_VERSION = os.getenv('BOT_VERSION', '9.1-PRO')
+BOT_VERSION = os.getenv('BOT_VERSION', '9.2-PRO')
 BOT_DEVELOPER = os.getenv('BOT_DEVELOPER', 'FaiLive2')
 
 # Free VPS fixed specs
@@ -58,7 +56,6 @@ FREE_VPS_RAM_GB = 2
 FREE_VPS_CPU = 4
 FREE_VPS_DISK_GB = 5
 
-# OS Options for VPS Creation and Reinstall
 OS_OPTIONS = [
     {"label": "Ubuntu 20.04 LTS", "value": "ubuntu:20.04"},
     {"label": "Ubuntu 22.04 LTS", "value": "ubuntu:22.04"},
@@ -69,7 +66,6 @@ OS_OPTIONS = [
     {"label": "Debian 13 (Trixie)", "value": "images:debian/13"},
 ]
 
-# Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -80,7 +76,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(f'{BOT_NAME.lower()}_vps_bot')
 
-# Database setup
+# ============================================================
+# DATABASE
+# ============================================================
 def get_db():
     conn = sqlite3.connect('vps.db')
     conn.execute("PRAGMA journal_mode=WAL")
@@ -97,7 +95,7 @@ def init_db():
         user_id TEXT PRIMARY KEY
     )''')
     for uid in MAIN_ADMIN_IDS_ENV:
-        cur.execute('INSERT OR IGNORE INTO main_admins (user_id) VALUES (?)', (uid,))
+        cur.execute('INSERT OR IGNORE INTO main_admins (user_id) VALUES (?)', (str(uid),))
     cur.execute('''CREATE TABLE IF NOT EXISTS nodes (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         name TEXT UNIQUE NOT NULL,
@@ -190,7 +188,7 @@ def set_setting(key: str, value: str):
 def has_claimed_free_vps(user_id: str) -> bool:
     conn = get_db()
     cur = conn.cursor()
-    cur.execute('SELECT 1 FROM free_vps_claimed WHERE user_id = ?', (user_id,))
+    cur.execute('SELECT 1 FROM free_vps_claimed WHERE user_id = ?', (str(user_id),))
     row = cur.fetchone()
     conn.close()
     return row is not None
@@ -199,7 +197,7 @@ def record_free_vps_claim(user_id: str, container_name: str):
     conn = get_db()
     cur = conn.cursor()
     cur.execute('INSERT OR REPLACE INTO free_vps_claimed (user_id, container_name, claimed_at) VALUES (?, ?, ?)',
-                (user_id, container_name, datetime.now().isoformat()))
+                (str(user_id), container_name, datetime.now().isoformat()))
     conn.commit()
     conn.close()
 
@@ -255,13 +253,46 @@ def get_vps_data() -> Dict[str, List[Dict[str, Any]]]:
         data[user_id].append(vps)
     return data
 
+# ============================================================
+# LIVE ADMIN CHECKS — query DB each time (fixes stale-cache bug)
+# ============================================================
+def db_is_main_admin(user_id) -> bool:
+    """Live check: is this user_id a main admin? Reads DB every call."""
+    uid = str(user_id).strip()
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute('SELECT 1 FROM main_admins WHERE user_id = ?', (uid,))
+        row = cur.fetchone()
+        conn.close()
+        return row is not None
+    except Exception as e:
+        logger.error(f"db_is_main_admin error: {e}")
+        return False
+
+def db_is_admin(user_id) -> bool:
+    """Live check: is this user_id any admin (main OR regular)? Reads DB every call."""
+    uid = str(user_id).strip()
+    if db_is_main_admin(uid):
+        return True
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute('SELECT 1 FROM admins WHERE user_id = ?', (uid,))
+        row = cur.fetchone()
+        conn.close()
+        return row is not None
+    except Exception as e:
+        logger.error(f"db_is_admin error: {e}")
+        return False
+
 def get_admins() -> List[str]:
     conn = get_db()
     cur = conn.cursor()
     cur.execute('SELECT user_id FROM admins')
     rows = cur.fetchall()
     conn.close()
-    return [row['user_id'] for row in rows]
+    return [str(row['user_id']) for row in rows]
 
 def get_main_admins() -> List[str]:
     conn = get_db()
@@ -269,15 +300,38 @@ def get_main_admins() -> List[str]:
     cur.execute('SELECT user_id FROM main_admins')
     rows = cur.fetchall()
     conn.close()
-    ids = [row['user_id'] for row in rows]
+    ids = [str(row['user_id']) for row in rows]
     return ids if ids else [str(MAIN_ADMIN_ID)]
 
-def save_main_admins():
+def db_add_main_admin(user_id):
+    uid = str(user_id).strip()
     conn = get_db()
     cur = conn.cursor()
-    cur.execute('DELETE FROM main_admins')
-    for uid in main_admin_ids:
-        cur.execute('INSERT INTO main_admins (user_id) VALUES (?)', (uid,))
+    cur.execute('INSERT OR IGNORE INTO main_admins (user_id) VALUES (?)', (uid,))
+    conn.commit()
+    conn.close()
+
+def db_remove_main_admin(user_id):
+    uid = str(user_id).strip()
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute('DELETE FROM main_admins WHERE user_id = ?', (uid,))
+    conn.commit()
+    conn.close()
+
+def db_add_admin(user_id):
+    uid = str(user_id).strip()
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute('INSERT OR IGNORE INTO admins (user_id) VALUES (?)', (uid,))
+    conn.commit()
+    conn.close()
+
+def db_remove_admin(user_id):
+    uid = str(user_id).strip()
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute('DELETE FROM admins WHERE user_id = ?', (uid,))
     conn.commit()
     conn.close()
 
@@ -310,20 +364,11 @@ def save_vps_data():
     conn.commit()
     conn.close()
 
-def save_admin_data():
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute('DELETE FROM admins')
-    for admin_id in admin_data['admins']:
-        cur.execute('INSERT INTO admins (user_id) VALUES (?)', (admin_id,))
-    conn.commit()
-    conn.close()
-
 # Port forwarding functions
 def get_user_allocation(user_id: str) -> int:
     conn = get_db()
     cur = conn.cursor()
-    cur.execute('SELECT allocated_ports FROM port_allocations WHERE user_id = ?', (user_id,))
+    cur.execute('SELECT allocated_ports FROM port_allocations WHERE user_id = ?', (str(user_id),))
     row = cur.fetchone()
     conn.close()
     return row[0] if row else 0
@@ -331,7 +376,7 @@ def get_user_allocation(user_id: str) -> int:
 def get_user_used_ports(user_id: str) -> int:
     conn = get_db()
     cur = conn.cursor()
-    cur.execute('SELECT COUNT(*) FROM port_forwards WHERE user_id = ?', (user_id,))
+    cur.execute('SELECT COUNT(*) FROM port_forwards WHERE user_id = ?', (str(user_id),))
     row = cur.fetchone()
     conn.close()
     return row[0]
@@ -339,14 +384,14 @@ def get_user_used_ports(user_id: str) -> int:
 def allocate_ports(user_id: str, amount: int):
     conn = get_db()
     cur = conn.cursor()
-    cur.execute('INSERT OR REPLACE INTO port_allocations (user_id, allocated_ports) VALUES (?, COALESCE((SELECT allocated_ports FROM port_allocations WHERE user_id = ?), 0) + ?)', (user_id, user_id, amount))
+    cur.execute('INSERT OR REPLACE INTO port_allocations (user_id, allocated_ports) VALUES (?, COALESCE((SELECT allocated_ports FROM port_allocations WHERE user_id = ?), 0) + ?)', (str(user_id), str(user_id), amount))
     conn.commit()
     conn.close()
 
 def deallocate_ports(user_id: str, amount: int):
     conn = get_db()
     cur = conn.cursor()
-    cur.execute('UPDATE port_allocations SET allocated_ports = GREATEST(0, allocated_ports - ?) WHERE user_id = ?', (amount, user_id))
+    cur.execute('UPDATE port_allocations SET allocated_ports = GREATEST(0, allocated_ports - ?) WHERE user_id = ?', (amount, str(user_id)))
     conn.commit()
     conn.close()
 
@@ -372,7 +417,7 @@ async def create_port_forward(user_id: str, container: str, vps_port: int, node_
         conn = get_db()
         cur = conn.cursor()
         cur.execute('INSERT INTO port_forwards (user_id, vps_container, vps_port, host_port, created_at) VALUES (?, ?, ?, ?, ?)',
-                    (user_id, container, vps_port, host_port, datetime.now().isoformat()))
+                    (str(user_id), container, vps_port, host_port, datetime.now().isoformat()))
         conn.commit()
         conn.close()
         return host_port
@@ -405,7 +450,7 @@ async def remove_port_forward(forward_id: int, is_admin: bool = False) -> tuple[
 def get_user_forwards(user_id: str) -> List[Dict]:
     conn = get_db()
     cur = conn.cursor()
-    cur.execute('SELECT * FROM port_forwards WHERE user_id = ? ORDER BY created_at DESC', (user_id,))
+    cur.execute('SELECT * FROM port_forwards WHERE user_id = ? ORDER BY created_at DESC', (str(user_id),))
     rows = cur.fetchall()
     conn.close()
     return [dict(row) for row in rows]
@@ -443,8 +488,6 @@ init_db()
 
 # Load data at startup
 vps_data = get_vps_data()
-admin_data = {'admins': get_admins()}
-main_admin_ids = set(get_main_admins())
 
 # Global settings
 CPU_THRESHOLD = int(get_setting('cpu_threshold', 90))
@@ -496,21 +539,34 @@ def create_info_embed(title, description=""):
 def create_warning_embed(title, description=""):
     return create_embed(title, description, color=0xffaa00)
 
+# ============================================================
+# ADMIN DECORATORS — now using LIVE DB checks
+# ============================================================
 def is_admin():
     async def predicate(ctx):
-        user_id = str(ctx.author.id)
-        if user_id in main_admin_ids or user_id in admin_data.get("admins", []):
+        if db_is_admin(ctx.author.id):
             return True
-        raise commands.CheckFailure("You need admin permissions to use this command. Contact support.")
+        raise commands.CheckFailure(
+            f"You need admin permissions to use this command.\n"
+            f"Your ID: `{ctx.author.id}` — ask a main admin to run "
+            f"`{PREFIX}admin-add @you` or `{PREFIX}add-admin {ctx.author.id}`."
+        )
     return commands.check(predicate)
 
 def is_main_admin():
     async def predicate(ctx):
-        if str(ctx.author.id) in main_admin_ids:
+        if db_is_main_admin(ctx.author.id):
             return True
-        raise commands.CheckFailure("Only the main admin can use this command.")
+        raise commands.CheckFailure(
+            f"Only a main admin can use this command.\n"
+            f"Your ID: `{ctx.author.id}` — the owner must run "
+            f"`{PREFIX}add-admin {ctx.author.id}` to grant access."
+        )
     return commands.check(predicate)
 
+# ============================================================
+# LXC helpers
+# ============================================================
 async def execute_lxc(container_name: str, command: str, timeout=120, node_id: Optional[int] = None):
     if node_id is None:
         node_id = find_node_id_for_container(container_name)
@@ -634,16 +690,8 @@ def generate_password(length: int = 16) -> str:
     alphabet = string.ascii_letters + string.digits
     return ''.join(secrets.choice(alphabet) for _ in range(length))
 
-# ============================================================
-# MODIFIED: setup_ssh_access now accepts is_free flag and
-# sets the prompt label accordingly.
-# ============================================================
 async def setup_ssh_access(container_name: str, node_id: int, user_id: str, vps_count: int, config_str: str, is_free: bool = False) -> str:
-    """Installs openssh-server, sets a random root password, configures welcome banner and prompt.
-    Prompt label is 'Free-user' for free VPS, 'paid-user' otherwise."""
     password = generate_password()
-
-    # Role-aware prompt label
     user_type_label = "Free-user" if is_free else "paid-user"
 
     motd_script = f"""#!/bin/bash
@@ -670,7 +718,6 @@ echo ""
 """
     b64_motd = base64.b64encode(motd_script.encode()).decode()
 
-    # ===== CHANGED: use user_type_label in the prompt =====
     profile_script = f"""#!/bin/bash
 source /etc/profile.d/failive2_welcome.sh
 export PS1="\\[\\e[1;31m\\]root@failive2-cloud-{user_type_label}-{user_id}\\[\\e[0m\\]:\\[\\e[1;34m\\]~# \\[\\e[0m\\]"
@@ -687,7 +734,6 @@ export PS1="\\[\\e[1;31m\\]root@failive2-cloud-{user_type_label}-{user_id}\\[\\e
         "chmod +x /etc/profile.d/failive2_welcome.sh",
         f"echo '{b64_profile}' | base64 -d > /root/.bash_profile",
         "chmod +x /root/.bash_profile",
-        # ===== CHANGED: same label used in .bashrc =====
         f"echo 'export PS1=\"\\[\\e[1;31m\\]root@failive2-cloud-{user_type_label}-{user_id}\\[\\e[0m\\]:\\[\\e[1;34m\\]~# \\[\\e[0m\\]\"' >> /root/.bashrc",
         "systemctl enable ssh 2>/dev/null || systemctl enable sshd 2>/dev/null || true",
         "systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null || service ssh restart 2>/dev/null || service sshd restart 2>/dev/null || true"
@@ -699,9 +745,6 @@ export PS1="\\[\\e[1;31m\\]root@failive2-cloud-{user_type_label}-{user_id}\\[\\e
             logger.warning(f"SSH setup command failed in {container_name}: {cmd} - {cmd_error}")
     return password
 
-# ---------------------------------------------------------------------------
-# Pinggy.io SSH tunnel system
-# ---------------------------------------------------------------------------
 PINGGY_LOG_PATH = "/root/.pinggy_tunnel.log"
 
 def parse_pinggy_address(log_text: str) -> Optional[str]:
@@ -1086,7 +1129,7 @@ def get_uptime():
 
 def get_default_storage_pool():
     try:
-        result = subprocess.run(['lxc', 'storage', 'list', '--format', 'csv'], 
+        result = subprocess.run(['lxc', 'storage', 'list', '--format', 'csv'],
                               capture_output=True, text=True)
         lines = result.stdout.strip().split('\n')
         if lines and lines[0]:
@@ -1102,6 +1145,14 @@ async def on_ready():
     logger.info(f'{bot.user} has connected to Discord!')
     await bot.change_presence(activity=discord.Activity(type=discord.ActivityType.watching, name=f"{BOT_NAME} VPS Manager"))
     logger.info(f"{BOT_NAME} Bot is ready!")
+    # Log live main admins at startup so you can verify
+    try:
+        live_main = get_main_admins()
+        logger.info(f"Loaded main admins from DB: {live_main}")
+        live_reg = get_admins()
+        logger.info(f"Loaded regular admins from DB: {live_reg}")
+    except Exception as e:
+        logger.error(f"Failed to list admins at startup: {e}")
 
 @bot.event
 async def on_command_error(ctx, error):
@@ -1121,7 +1172,7 @@ async def on_command_error(ctx, error):
         await ctx.send(embed=create_error_embed("System Error", "An unexpected error occurred. Support has been notified."))
 
 # ============================================================
-# FREE VPS CREATION (2vps-create-f) — any user, one-time use
+# FREE VPS CREATION
 # ============================================================
 class FreeOSSelectView(discord.ui.View):
     def __init__(self, ctx, user: discord.Member, node_id: int):
@@ -1185,7 +1236,6 @@ class FreeOSSelectView(discord.ui.View):
             await safe_start_container(container_name, self.node_id)
             await apply_internal_permissions(container_name, self.node_id)
 
-            # ===== CHANGED: pass is_free=True =====
             root_password = await setup_ssh_access(
                 container_name, self.node_id, user_id, vps_count, config_str, is_free=True
             )
@@ -1319,7 +1369,6 @@ class FreeOSSelectView(discord.ui.View):
 
 @bot.command(name='create-f')
 async def create_free_vps(ctx):
-    """Claim a free VPS (2GB RAM / 4 CPU / 5GB disk). One-time use per user."""
     user_id = str(ctx.author.id)
 
     if has_claimed_free_vps(user_id):
@@ -1359,6 +1408,9 @@ async def create_free_vps(ctx):
     await ctx.send(embed=embed, view=view)
 
 
+# ============================================================
+# BASIC COMMANDS
+# ============================================================
 @bot.command(name='ping')
 async def ping(ctx):
     latency = round(bot.latency * 1000)
@@ -1576,7 +1628,6 @@ class OSSelectView(discord.ui.View):
             await safe_start_container(container_name, self.node_id)
             await apply_internal_permissions(container_name, self.node_id)
 
-            # ===== CHANGED: pass is_free=False (paid VPS) =====
             root_password = await setup_ssh_access(container_name, self.node_id, user_id, vps_count, config_str, is_free=False)
             pinggy_address = await establish_pinggy_tunnel(container_name, self.node_id)
 
@@ -1679,7 +1730,6 @@ class ReinstallOSSelectView(discord.ui.View):
             await apply_internal_permissions(self.container_name, self.node_id)
 
             config_str = f"{self.ram_gb}GB RAM / {self.cpu} CPU / {self.storage_gb}GB Disk"
-            # ===== CHANGED: preserve the free/paid status of this VPS on reinstall =====
             target_vps_pre = vps_data[self.owner_id][self.actual_idx]
             was_free = target_vps_pre.get("is_free", False)
             root_password = await setup_ssh_access(self.container_name, self.node_id, self.owner_id, self.actual_idx + 1, config_str, is_free=was_free)
@@ -2185,7 +2235,7 @@ class ManageView(discord.ui.View):
 @bot.command(name='manage')
 async def manage_vps(ctx, user: discord.Member = None):
     if user:
-        if str(ctx.author.id) not in main_admin_ids and str(ctx.author.id) not in admin_data.get("admins", []):
+        if not db_is_admin(ctx.author.id):
             await ctx.send(embed=create_error_embed("Access Denied", "Only admins can manage other users' VPS."))
             return
         user_id = str(user.id)
@@ -2796,7 +2846,7 @@ async def system_status(ctx):
     whitelisted_vps = 0
     free_vps_count = 0
 
-    total_admins = len(admin_data.get("admins", [])) + 1
+    total_admins = len(get_admins()) + len(get_main_admins())
 
     conn = get_db()
     cur = conn.cursor()
@@ -2911,7 +2961,7 @@ async def system_status(ctx):
 
     add_field(embed, "⚙️ System Information",
         f"**Total Admins:** {total_admins}\n"
-        f"**Main Admin(s):** {', '.join(f'<@{mid}>' for mid in main_admin_ids)}\n"
+        f"**Main Admin(s):** {', '.join(f'<@{mid}>' for mid in get_main_admins())}\n"
         f"**Ports Allocated:** {total_ports_allocated}\n"
         f"**Ports In Use:** {total_ports_used}\n"
         f"**Ports Available:** {total_ports_allocated - total_ports_used}",
@@ -2984,15 +3034,14 @@ async def status_summary(ctx):
 @bot.command(name='admin-add')
 @is_main_admin()
 async def admin_add(ctx, user: discord.Member):
-    user_id = str(user.id)
-    if user_id in main_admin_ids:
-        await ctx.send(embed=create_error_embed("Already Admin", "This user is already the main admin!"))
+    user_id = str(user.id).strip()
+    if db_is_main_admin(user_id):
+        await ctx.send(embed=create_error_embed("Already Admin", "This user is already a main admin!"))
         return
-    if user_id in admin_data.get("admins", []):
-        await ctx.send(embed=create_error_embed("Already Admin", f"{user.mention} is already an admin!"))
-        return
-    admin_data["admins"].append(user_id)
-    save_admin_data()
+    if db_is_admin(user_id) and user_id not in get_admins():
+        # already a regular admin
+        pass
+    db_add_admin(user_id)
     await ctx.send(embed=create_success_embed("Admin Added", f"{user.mention} is now an admin!"))
     try:
         await user.send(embed=create_embed("🎉 Admin Role Granted", f"You are now an admin by {ctx.author.mention}", 0x00ff88))
@@ -3002,15 +3051,14 @@ async def admin_add(ctx, user: discord.Member):
 @bot.command(name='admin-remove')
 @is_main_admin()
 async def admin_remove(ctx, user: discord.Member):
-    user_id = str(user.id)
-    if user_id in main_admin_ids:
-        await ctx.send(embed=create_error_embed("Cannot Remove", "You cannot remove the main admin!"))
+    user_id = str(user.id).strip()
+    if db_is_main_admin(user_id):
+        await ctx.send(embed=create_error_embed("Cannot Remove", "You cannot remove a main admin with this command! Use `{PREFIX}rm-admin <id>` instead."))
         return
-    if user_id not in admin_data.get("admins", []):
+    if user_id not in get_admins():
         await ctx.send(embed=create_error_embed("Not Admin", f"{user.mention} is not an admin!"))
         return
-    admin_data["admins"].remove(user_id)
-    save_admin_data()
+    db_remove_admin(user_id)
     await ctx.send(embed=create_success_embed("Admin Removed", f"{user.mention} is no longer an admin!"))
     try:
         await user.send(embed=create_embed("⚠️ Admin Role Revoked", f"Your admin role was removed by {ctx.author.mention}", 0xff3366))
@@ -3020,17 +3068,17 @@ async def admin_remove(ctx, user: discord.Member):
 @bot.command(name='add-admin')
 @is_main_admin()
 async def add_admin_id(ctx, user_id: str):
-    if not user_id.isdigit():
+    uid = str(user_id).strip()
+    if not uid.isdigit():
         await ctx.send(embed=create_error_embed("Invalid ID", "Please provide a numeric Discord user ID."))
         return
-    if user_id in main_admin_ids:
-        await ctx.send(embed=create_error_embed("Already Admin", f"`{user_id}` is already a main admin!"))
+    if db_is_main_admin(uid):
+        await ctx.send(embed=create_error_embed("Already Admin", f"`{uid}` is already a main admin!"))
         return
-    main_admin_ids.add(user_id)
-    save_main_admins()
-    await ctx.send(embed=create_success_embed("Main Admin Added", f"`{user_id}` is now a main admin!"))
+    db_add_main_admin(uid)
+    await ctx.send(embed=create_success_embed("Main Admin Added", f"`{uid}` is now a main admin!"))
     try:
-        user = await bot.fetch_user(int(user_id))
+        user = await bot.fetch_user(int(uid))
         await user.send(embed=create_embed("🎉 Main Admin Access Granted", f"You are now a main admin of {BOT_NAME}, granted by {ctx.author.mention}", 0x00ff88))
     except Exception:
         pass
@@ -3038,17 +3086,18 @@ async def add_admin_id(ctx, user_id: str):
 @bot.command(name='rm-admin')
 @is_main_admin()
 async def rm_admin_id(ctx, user_id: str):
-    if user_id not in main_admin_ids:
-        await ctx.send(embed=create_error_embed("Not Admin", f"`{user_id}` is not a main admin!"))
+    uid = str(user_id).strip()
+    live_mains = get_main_admins()
+    if uid not in live_mains:
+        await ctx.send(embed=create_error_embed("Not Admin", f"`{uid}` is not a main admin!"))
         return
-    if len(main_admin_ids) <= 1:
+    if len(live_mains) <= 1:
         await ctx.send(embed=create_error_embed("Cannot Remove", "At least one main admin must remain."))
         return
-    main_admin_ids.discard(user_id)
-    save_main_admins()
-    await ctx.send(embed=create_success_embed("Main Admin Removed", f"`{user_id}` is no longer a main admin!"))
+    db_remove_main_admin(uid)
+    await ctx.send(embed=create_success_embed("Main Admin Removed", f"`{uid}` is no longer a main admin!"))
     try:
-        user = await bot.fetch_user(int(user_id))
+        user = await bot.fetch_user(int(uid))
         await user.send(embed=create_embed("⚠️ Main Admin Access Revoked", f"Your main admin role was removed by {ctx.author.mention}", 0xff3366))
     except Exception:
         pass
@@ -3056,19 +3105,20 @@ async def rm_admin_id(ctx, user_id: str):
 @bot.command(name='admin-list')
 @is_main_admin()
 async def admin_list(ctx):
-    admins = admin_data.get("admins", [])
     embed = create_embed("👑 Admin Team", "Current administrators:", 0x1a1a1a)
+    live_mains = get_main_admins()
     main_admin_list = []
-    for main_id in main_admin_ids:
+    for main_id in live_mains:
         try:
             main_user = await bot.fetch_user(int(main_id))
             main_admin_list.append(f"• {main_user.mention} (ID: {main_id})")
         except:
             main_admin_list.append(f"• Unknown User (ID: {main_id})")
     add_field(embed, "🔰 Main Admin(s)", "\n".join(main_admin_list) or "None set", False)
-    if admins:
+    live_admins = get_admins()
+    if live_admins:
         admin_list = []
-        for admin_id in admins:
+        for admin_id in live_admins:
             try:
                 admin_user = await bot.fetch_user(int(admin_id))
                 admin_list.append(f"• {admin_user.mention} (ID: {admin_id})")
@@ -3078,6 +3128,36 @@ async def admin_list(ctx):
         add_field(embed, "🛡️ Admins", admin_text, False)
     else:
         add_field(embed, "🛡️ Admins", "No additional admins", False)
+    await ctx.send(embed=embed)
+
+# ============================================================
+# NEW: admin debug command — shows what the bot thinks your status is
+# ============================================================
+@bot.command(name='admin-debug')
+async def admin_debug(ctx):
+    """Show your live admin status + which IDs the bot has on record."""
+    uid = str(ctx.author.id).strip()
+    live_mains = get_main_admins()
+    live_admins = get_admins()
+    is_main = db_is_main_admin(uid)
+    is_reg = uid in live_admins
+    is_any = is_main or is_reg
+    embed = create_info_embed(
+        "🔎 Admin Debug",
+        f"**Your user_id (string):** `{uid}`\n"
+        f"**Your user_id (repr):** `{repr(uid)}`\n\n"
+        f"**Is main admin?** {'✅ YES' if is_main else '❌ NO'}\n"
+        f"**Is regular admin?** {'✅ YES' if is_reg else '❌ NO'}\n"
+        f"**Can use admin cmds?** {'✅ YES' if is_any else '❌ NO'}\n\n"
+        f"**Main admins in DB:** `{live_mains}`\n"
+        f"**Regular admins in DB:** `{live_admins}`"
+    )
+    add_field(embed, "How to fix",
+        f"• If you're not listed, a main admin must run:\n"
+        f"  `{PREFIX}add-admin {uid}` (grants main-admin)\n"
+        f"  `{PREFIX}admin-add @you` (grants regular admin)\n\n"
+        f"• If you ARE listed but still get errors, restart the bot:\n"
+        f"  `systemctl restart bot`", False)
     await ctx.send(embed=embed)
 
 @bot.command(name="userinfo")
@@ -3102,7 +3182,7 @@ async def user_info(ctx, user: discord.Member):
         inline=True
     )
 
-    is_admin_user = user_id in main_admin_ids or user_id in admin_data.get("admins", [])
+    is_admin_user = db_is_admin(user_id)
     embed.add_field(
         name="🛡️ Admin",
         value="✅ Yes" if is_admin_user else "❌ No",
@@ -3205,7 +3285,7 @@ async def user_info(ctx, user: discord.Member):
 @is_admin()
 async def server_stats(ctx):
     total_users = len(vps_data)
-    total_admins = len(admin_data.get("admins", [])) + 1
+    total_admins = len(get_admins()) + len(get_main_admins())
     total_vps = sum(len(vps_list) for vps_list in vps_data.values())
     total_ram = total_cpu = total_storage = 0
     running_vps = suspended_vps = stopped_vps = 0
@@ -4025,10 +4105,14 @@ async def about(ctx):
     total_users = len(vps_data)
     total_vps = sum(len(vps_list) for vps_list in vps_data.values())
     latency = round(bot.latency * 1000)
-    main_admin = await bot.fetch_user(MAIN_ADMIN_ID)
+    try:
+        main_admin = await bot.fetch_user(MAIN_ADMIN_ID)
+        main_admin_mention = main_admin.mention
+    except:
+        main_admin_mention = f"<@{MAIN_ADMIN_ID}>"
     embed = create_info_embed(f"About {BOT_NAME}", f"Bot information and statistics")
     add_field(embed, "Bot Name", BOT_NAME, True)
-    add_field(embed, "Main Owner", main_admin.mention, True)
+    add_field(embed, "Main Owner", main_admin_mention, True)
     add_field(embed, "Developer", BOT_DEVELOPER, True)
     add_field(embed, "Ping", f"{latency}ms", True)
     add_field(embed, "Version", BOT_VERSION, True)
@@ -4040,8 +4124,7 @@ async def about(ctx):
 
 @bot.command(name='quickhelp')
 async def quick_help(ctx):
-    user_id = str(ctx.author.id)
-    is_admin_user = user_id in main_admin_ids or user_id in admin_data.get("admins", [])
+    is_admin_user = db_is_admin(ctx.author.id)
     embed = create_info_embed("🚀 Quick Help Reference",
         f"Quick reference for common tasks. Use `{PREFIX}help` for complete command list.")
     add_field(embed, "👤 For Users",
@@ -4062,7 +4145,8 @@ async def quick_help(ctx):
         f"• Ports not working? Use `{PREFIX}repair-ports <container>` (admin)\n"
         f"• VPS suspended? Contact admin to unsuspend\n"
         f"• Need more resources? Contact admin for upgrade\n"
-        f"• SSH not working? Try reinstall with different OS", False)
+        f"• SSH not working? Try reinstall with different OS\n"
+        f"• Not admin? Use `{PREFIX}admin-debug` to see your status", False)
     if is_admin_user:
         add_field(embed, "🛡️ Admin Quick Actions",
             f"• `{PREFIX}create 2 2 20 @user` - Create 2GB/2CPU/20GB VPS\n"
@@ -4080,9 +4164,8 @@ async def help_search(ctx, *, search_term: str = None):
         await show_help(ctx)
         return
     search_term = search_term.lower()
-    user_id = str(ctx.author.id)
-    is_admin_user = user_id in main_admin_ids or user_id in admin_data.get("admins", [])
-    is_main_admin_user = user_id in main_admin_ids
+    is_admin_user = db_is_admin(ctx.author.id)
+    is_main_admin_user = db_is_main_admin(ctx.author.id)
     all_commands = []
     user_categories = ["user", "vps", "ports", "system", "bot"]
     for cat in user_categories:
@@ -4112,7 +4195,18 @@ async def help_search(ctx, *, search_term: str = None):
 
 @bot.command(name='node')
 @is_admin()
-async def node_cmd(ctx, sub: str, *args):
+async def node_cmd(ctx, sub: str = None, *args):
+    if sub is None:
+        embed = create_info_embed("Node Management",
+            f"**Usage:** `{PREFIX}node <create|list|edit|delete|status>`")
+        add_field(embed, "Subcommands",
+            f"• `{PREFIX}node create` – Create a new node\n"
+            f"• `{PREFIX}node list` – List all nodes\n"
+            f"• `{PREFIX}node status <id>` – Check node status\n"
+            f"• `{PREFIX}node edit <id>` – Edit node details\n"
+            f"• `{PREFIX}node delete <id> [force]` – Delete a node", False)
+        await ctx.send(embed=embed)
+        return
     if sub == 'create':
         await ctx.send("Enter node name:")
         def check(m):
@@ -4351,7 +4445,8 @@ async def node_cmd(ctx, sub: str, *args):
         await ctx.send(embed=embed)
     else:
         embed = create_info_embed("Node Management",
-            f"Manage multi-node infrastructure for {BOT_NAME}")
+            f"**Usage:** `{PREFIX}node <create|list|edit|delete|status>`")
+        await ctx.send(embed=embed)
 
 class HelpView(discord.ui.View):
     def __init__(self, ctx):
@@ -4427,7 +4522,8 @@ class HelpView(discord.ui.View):
                     (f"{PREFIX}ping", "Check bot latency"),
                     (f"{PREFIX}uptime", "Show host uptime"),
                     (f"{PREFIX}help", "Show this help menu"),
-                    (f"{PREFIX}set-status <type> <name>", "Set bot status (Admin only)")
+                    (f"{PREFIX}set-status <type> <name>", "Set bot status (Admin only)"),
+                    (f"{PREFIX}admin-debug", "Show YOUR live admin status")
                 ]
             },
             "admin": {
@@ -4460,7 +4556,8 @@ class HelpView(discord.ui.View):
                     (f"{PREFIX}admin-remove @user", "Remove admin (mention)"),
                     (f"{PREFIX}add-admin <user_id>", "Add main admin (by ID)"),
                     (f"{PREFIX}rm-admin <user_id>", "Remove main admin (by ID)"),
-                    (f"{PREFIX}admin-list", "List admins")
+                    (f"{PREFIX}admin-list", "List admins"),
+                    (f"{PREFIX}admin-debug", "Show YOUR live admin status")
                 ],
                 "admin_only": True,
                 "main_admin_only": True
@@ -4472,9 +4569,8 @@ class HelpView(discord.ui.View):
 
     def update_select(self):
         self.select = discord.ui.Select(placeholder="Select Category", options=[])
-        user_id = str(self.ctx.author.id)
-        is_admin_user = user_id in main_admin_ids or user_id in admin_data.get("admins", [])
-        is_main_admin_user = user_id in main_admin_ids
+        is_admin_user = db_is_admin(self.ctx.author.id)
+        is_main_admin_user = db_is_main_admin(self.ctx.author.id)
         options = []
         basic_categories = ["user", "vps", "ports", "system", "bot"]
         for category in basic_categories:
@@ -4584,7 +4680,7 @@ async def commands_alias(ctx):
 
 @bot.command(name='stats')
 async def stats_alias(ctx):
-    if str(ctx.author.id) in main_admin_ids or str(ctx.author.id) in admin_data.get("admins", []):
+    if db_is_admin(ctx.author.id):
         await server_stats(ctx)
     else:
         await ctx.send(embed=create_error_embed("Access Denied", "This command requires admin privileges."))
@@ -4592,7 +4688,7 @@ async def stats_alias(ctx):
 
 @bot.command(name='info')
 async def info_alias(ctx, user: discord.Member = None):
-    if str(ctx.author.id) in main_admin_ids or str(ctx.author.id) in admin_data.get("admins", []):
+    if db_is_admin(ctx.author.id):
         if user:
             await user_info(ctx, user)
         else:
