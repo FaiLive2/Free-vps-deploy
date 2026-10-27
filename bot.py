@@ -46,9 +46,9 @@ def get_public_ip() -> str:
 
 _raw_main_admin_ids = os.getenv('MAIN_ADMIN_ID', '1405866008127864852')
 MAIN_ADMIN_IDS_ENV = [uid.strip() for uid in _raw_main_admin_ids.split(',') if uid.strip()]
-MAIN_ADMIN_ID = int(MAIN_ADMIN_IDS_ENV[0])  # kept for backward-compat display purposes
+MAIN_ADMIN_ID = int(MAIN_ADMIN_IDS_ENV[0])
 VPS_USER_ROLE_ID = int(os.getenv('VPS_USER_ROLE_ID', '1210291131301101618'))
-FREE_VPS_ROLE_ID = int(os.getenv('FREE_VPS_ROLE_ID', '0'))  # 0 = auto-detect/create
+FREE_VPS_ROLE_ID = int(os.getenv('FREE_VPS_ROLE_ID', '0'))
 DEFAULT_STORAGE_POOL = os.getenv('DEFAULT_STORAGE_POOL', 'default')
 BOT_VERSION = os.getenv('BOT_VERSION', '9.1-PRO')
 BOT_DEVELOPER = os.getenv('BOT_DEVELOPER', 'FaiLive2')
@@ -69,7 +69,7 @@ OS_OPTIONS = [
     {"label": "Debian 13 (Trixie)", "value": "images:debian/13"},
 ]
 
-# Configure logging to file and console
+# Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -108,11 +108,10 @@ def init_db():
         url TEXT,
         is_local INTEGER DEFAULT 0
     )''')
-    # Add local node if not exists
     cur.execute('SELECT COUNT(*) FROM nodes WHERE is_local = 1')
     if cur.fetchone()[0] == 0:
         cur.execute('INSERT INTO nodes (name, location, total_vps, tags, api_key, url, is_local) VALUES (?, ?, ?, ?, ?, ?, ?)',
-                    (' Node', 'Local', 100, '[]', None, None, 1))  # Default capacity 100
+                    (' Node', 'Local', 100, '[]', None, None, 1))
     cur.execute('''CREATE TABLE IF NOT EXISTS vps (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id TEXT NOT NULL,
@@ -132,7 +131,6 @@ def init_db():
         root_password TEXT DEFAULT '',
         is_free INTEGER DEFAULT 0
     )''')
-    # Migrations
     cur.execute('PRAGMA table_info(vps)')
     info = cur.fetchall()
     columns = [col[1] for col in info]
@@ -144,7 +142,6 @@ def init_db():
         cur.execute("ALTER TABLE vps ADD COLUMN root_password TEXT DEFAULT ''")
     if 'is_free' not in columns:
         cur.execute("ALTER TABLE vps ADD COLUMN is_free INTEGER DEFAULT 0")
-    # Free VPS claim tracking
     cur.execute('''CREATE TABLE IF NOT EXISTS free_vps_claimed (
         user_id TEXT PRIMARY KEY,
         container_name TEXT NOT NULL,
@@ -439,7 +436,7 @@ def find_node_id_for_container(container_name: str) -> int:
     cur.execute('SELECT node_id FROM vps WHERE container_name = ?', (container_name,))
     row = cur.fetchone()
     conn.close()
-    return row[0] if row else 1  # Default to local
+    return row[0] if row else 1
 
 # Initialize database
 init_db()
@@ -449,7 +446,7 @@ vps_data = get_vps_data()
 admin_data = {'admins': get_admins()}
 main_admin_ids = set(get_main_admins())
 
-# Global settings from DB
+# Global settings
 CPU_THRESHOLD = int(get_setting('cpu_threshold', 90))
 RAM_THRESHOLD = int(get_setting('ram_threshold', 90))
 
@@ -459,10 +456,8 @@ intents.message_content = True
 intents.members = True
 bot = commands.Bot(command_prefix=PREFIX, intents=intents, help_command=None)
 
-# Resource monitoring settings (logging only)
 resource_monitor_active = True
 
-# Helper function to truncate text
 def truncate_text(text, max_length=1024):
     if not text:
         return text
@@ -470,7 +465,6 @@ def truncate_text(text, max_length=1024):
         return text
     return text[:max_length-3] + "..."
 
-# Embed creation functions
 def create_embed(title, description="", color=0x1a1a1a):
     embed = discord.Embed(
         title=truncate_text(f"🌟 {BOT_NAME} - {title}", 256),
@@ -502,7 +496,6 @@ def create_info_embed(title, description=""):
 def create_warning_embed(title, description=""):
     return create_embed(title, description, color=0xffaa00)
 
-# Admin checks
 def is_admin():
     async def predicate(ctx):
         user_id = str(ctx.author.id)
@@ -518,17 +511,13 @@ def is_main_admin():
         raise commands.CheckFailure("Only the main admin can use this command.")
     return commands.check(predicate)
 
-# LXC command execution with multi-node support
 async def execute_lxc(container_name: str, command: str, timeout=120, node_id: Optional[int] = None):
     if node_id is None:
         node_id = find_node_id_for_container(container_name)
     node = get_node(node_id)
-    
     if not node:
         raise Exception(f"Node {node_id} not found")
-    
     full_command = f"lxc {command}"
-    
     if node['is_local']:
         try:
             cmd = shlex.split(full_command)
@@ -543,7 +532,6 @@ async def execute_lxc(container_name: str, command: str, timeout=120, node_id: O
                 proc.kill()
                 await proc.wait()
                 raise asyncio.TimeoutError(f"Command timed out after {timeout} seconds")
-            
             if proc.returncode != 0:
                 error = stderr.decode().strip() if stderr else "Command failed with no error output"
                 raise Exception(f"Local LXC command failed: {error}\nCommand: {full_command}")
@@ -584,7 +572,6 @@ async def execute_lxc(container_name: str, command: str, timeout=120, node_id: O
                 raise Exception(f"Remote execution failed on {node['name']}: {str(e)}")
 
 async def safe_start_container(container_name: str, node_id: int):
-    """Starts a container, treating 'already running' as a success instead of an error."""
     try:
         await execute_lxc(container_name, f"start {container_name}", node_id=node_id)
     except Exception as e:
@@ -594,7 +581,6 @@ async def safe_start_container(container_name: str, node_id: int):
         else:
             raise
 
-# Apply LXC config
 async def apply_lxc_config(container_name: str, node_id: int):
     try:
         await execute_lxc(container_name, f"config set {container_name} security.nesting true", node_id=node_id)
@@ -624,7 +610,6 @@ async def apply_lxc_config(container_name: str, node_id: int):
     except Exception as e:
         logger.error(f"Failed to apply LXC config to {container_name}: {e}")
 
-# Apply internal permissions
 async def apply_internal_permissions(container_name: str, node_id: int):
     try:
         await asyncio.sleep(8)
@@ -646,14 +631,21 @@ async def apply_internal_permissions(container_name: str, node_id: int):
         logger.error(f"Failed to apply internal permissions to {container_name}: {e}")
 
 def generate_password(length: int = 16) -> str:
-    """Generate a random alnum-only password (safe to embed in shell commands)."""
     alphabet = string.ascii_letters + string.digits
     return ''.join(secrets.choice(alphabet) for _ in range(length))
 
-async def setup_ssh_access(container_name: str, node_id: int, user_id: str, vps_count: int, config_str: str) -> str:
-    """Installs openssh-server, sets a random root password, configures the welcome banner and prompt."""
+# ============================================================
+# MODIFIED: setup_ssh_access now accepts is_free flag and
+# sets the prompt label accordingly.
+# ============================================================
+async def setup_ssh_access(container_name: str, node_id: int, user_id: str, vps_count: int, config_str: str, is_free: bool = False) -> str:
+    """Installs openssh-server, sets a random root password, configures welcome banner and prompt.
+    Prompt label is 'Free-user' for free VPS, 'paid-user' otherwise."""
     password = generate_password()
-    
+
+    # Role-aware prompt label
+    user_type_label = "Free-user" if is_free else "paid-user"
+
     motd_script = f"""#!/bin/bash
 clear
 echo -e "\\e[1;36m"
@@ -677,10 +669,11 @@ echo -e "• Thank you for choosing FaiLive2 Cloud VPS!\\e[0m"
 echo ""
 """
     b64_motd = base64.b64encode(motd_script.encode()).decode()
-    
+
+    # ===== CHANGED: use user_type_label in the prompt =====
     profile_script = f"""#!/bin/bash
 source /etc/profile.d/failive2_welcome.sh
-export PS1="\\[\\e[1;31m\\]root@failive2-cloud-paid-user-{user_id}\\[\\e[0m\\]:\\[\\e[1;34m\\]~# \\[\\e[0m\\]"
+export PS1="\\[\\e[1;31m\\]root@failive2-cloud-{user_type_label}-{user_id}\\[\\e[0m\\]:\\[\\e[1;34m\\]~# \\[\\e[0m\\]"
 """
     b64_profile = base64.b64encode(profile_script.encode()).decode()
 
@@ -694,7 +687,8 @@ export PS1="\\[\\e[1;31m\\]root@failive2-cloud-paid-user-{user_id}\\[\\e[0m\\]:\
         "chmod +x /etc/profile.d/failive2_welcome.sh",
         f"echo '{b64_profile}' | base64 -d > /root/.bash_profile",
         "chmod +x /root/.bash_profile",
-        f"echo 'export PS1=\"\\[\\e[1;31m\\]root@failive2-cloud-paid-user-{user_id}\\[\\e[0m\\]:\\[\\e[1;34m\\]~# \\[\\e[0m\\]\"' >> /root/.bashrc",
+        # ===== CHANGED: same label used in .bashrc =====
+        f"echo 'export PS1=\"\\[\\e[1;31m\\]root@failive2-cloud-{user_type_label}-{user_id}\\[\\e[0m\\]:\\[\\e[1;34m\\]~# \\[\\e[0m\\]\"' >> /root/.bashrc",
         "systemctl enable ssh 2>/dev/null || systemctl enable sshd 2>/dev/null || true",
         "systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null || service ssh restart 2>/dev/null || service sshd restart 2>/dev/null || true"
     ]
@@ -768,7 +762,6 @@ async def establish_pinggy_tunnel(container_name: str, node_id: int, retries: in
     logger.warning(f"Pinggy: no tunnel address found for {container_name} after {retries} attempts")
     return None
 
-# Get or create paid VPS role
 async def get_or_create_vps_role(guild):
     global VPS_USER_ROLE_ID
     me = guild.me
@@ -806,7 +799,6 @@ async def get_or_create_vps_role(guild):
         logger.error(f"Failed to create VPS role: {e}")
         return None
 
-# Get or create FREE VPS role
 async def get_or_create_free_vps_role(guild):
     global FREE_VPS_ROLE_ID
     me = guild.me
@@ -844,7 +836,6 @@ async def get_or_create_free_vps_role(guild):
         logger.error(f"Failed to create Free VPS role: {e}")
         return None
 
-# Host resource functions
 def get_host_cpu_usage():
     try:
         if shutil.which("mpstat"):
@@ -936,11 +927,9 @@ def resource_monitor():
             logger.error(f"Error in resource monitor: {e}")
             time.sleep(60)
 
-# Start resource monitoring thread
 monitor_thread = threading.Thread(target=resource_monitor, daemon=True)
 monitor_thread.start()
 
-# Container stats with multi-node
 async def get_container_stats(container_name: str, node_id: Optional[int] = None) -> Dict:
     if node_id is None:
         node_id = find_node_id_for_container(container_name)
@@ -1108,7 +1097,6 @@ def get_default_storage_pool():
 
 DEFAULT_STORAGE_POOL = os.getenv('DEFAULT_STORAGE_POOL', get_default_storage_pool())
 
-# Bot events
 @bot.event
 async def on_ready():
     logger.info(f'{bot.user} has connected to Discord!')
@@ -1136,8 +1124,6 @@ async def on_command_error(ctx, error):
 # FREE VPS CREATION (2vps-create-f) — any user, one-time use
 # ============================================================
 class FreeOSSelectView(discord.ui.View):
-    """View shown to a non-admin user who typed 2vps-create-f.
-    Presents OS dropdown; on selection, auto-provisions the free VPS."""
     def __init__(self, ctx, user: discord.Member, node_id: int):
         super().__init__(timeout=180)
         self.ctx = ctx
@@ -1158,7 +1144,6 @@ class FreeOSSelectView(discord.ui.View):
             )
             return
 
-        # Double check one-time claim (race condition guard)
         if has_claimed_free_vps(str(self.user.id)):
             await interaction.response.send_message(
                 embed=create_error_embed(
@@ -1190,8 +1175,6 @@ class FreeOSSelectView(discord.ui.View):
         config_str = f"{FREE_VPS_RAM_GB}GB RAM / {FREE_VPS_CPU} CPU / {FREE_VPS_DISK_GB}GB Disk (FREE)"
 
         try:
-            # Record claim FIRST to lock one-time use (even if provisioning fails after this,
-            # we still block re-claiming to prevent abuse/spam; admin can reset if needed)
             record_free_vps_claim(user_id, container_name)
 
             await execute_lxc(container_name, f"init {os_version} {container_name} -s {DEFAULT_STORAGE_POOL}", node_id=self.node_id)
@@ -1202,8 +1185,9 @@ class FreeOSSelectView(discord.ui.View):
             await safe_start_container(container_name, self.node_id)
             await apply_internal_permissions(container_name, self.node_id)
 
+            # ===== CHANGED: pass is_free=True =====
             root_password = await setup_ssh_access(
-                container_name, self.node_id, user_id, vps_count, config_str
+                container_name, self.node_id, user_id, vps_count, config_str, is_free=True
             )
             pinggy_address = await establish_pinggy_tunnel(container_name, self.node_id)
 
@@ -1229,7 +1213,6 @@ class FreeOSSelectView(discord.ui.View):
             vps_data[user_id].append(vps_info)
             save_vps_data()
 
-            # Assign the FREE VPS role (not the paid one)
             if self.ctx.guild:
                 free_role = await get_or_create_free_vps_role(self.ctx.guild)
                 if free_role:
@@ -1238,7 +1221,6 @@ class FreeOSSelectView(discord.ui.View):
                     except discord.Forbidden:
                         logger.warning(f"Failed to assign Free VPS role to {self.user.name}")
 
-            # Public success embed
             success_embed = create_success_embed(
                 "🎉 Free VPS Created Successfully",
                 f"Your free VPS is ready! Check your DMs for login details."
@@ -1257,7 +1239,6 @@ class FreeOSSelectView(discord.ui.View):
 
             await interaction.followup.send(embed=success_embed)
 
-            # DM with full credentials
             dm_embed = create_success_embed(
                 "🎉 Your Free VPS is Ready!",
                 "Your free FaiLive2 Cloud VPS has been deployed!"
@@ -1318,7 +1299,6 @@ class FreeOSSelectView(discord.ui.View):
 
         except Exception as e:
             logger.error(f"Free VPS creation failed for {user_id}: {e}")
-            # Roll back the claim so the user can retry if provisioning failed
             try:
                 conn = get_db()
                 cur = conn.cursor()
@@ -1342,7 +1322,6 @@ async def create_free_vps(ctx):
     """Claim a free VPS (2GB RAM / 4 CPU / 5GB disk). One-time use per user."""
     user_id = str(ctx.author.id)
 
-    # One-time check
     if has_claimed_free_vps(user_id):
         await ctx.send(embed=create_error_embed(
             "Already Claimed",
@@ -1352,7 +1331,6 @@ async def create_free_vps(ctx):
         ))
         return
 
-    # Capacity check
     nodes = get_nodes()
     available_nodes = [n for n in nodes if get_current_vps_count(n['id']) < n['total_vps']]
     if not available_nodes:
@@ -1362,7 +1340,6 @@ async def create_free_vps(ctx):
         ))
         return
 
-    # Prefer local node if available
     local_avail = [n for n in available_nodes if n['is_local']]
     chosen_node = local_avail[0] if local_avail else available_nodes[0]
 
@@ -1382,7 +1359,6 @@ async def create_free_vps(ctx):
     await ctx.send(embed=embed, view=view)
 
 
-# Bot commands
 @bot.command(name='ping')
 async def ping(ctx):
     latency = round(bot.latency * 1000)
@@ -1465,12 +1441,10 @@ async def my_vps(ctx):
     for i, vps in enumerate(vps_list, start=1):
         node = get_node(vps.get("node_id"))
         node_name = node["name"] if node else "Unknown"
-
         config = vps.get("config", "Custom")
         ram = vps.get("ram", "0GB")
         cpu = vps.get("cpu", "0")
         storage = vps.get("storage", "0GB")
-
         if vps.get("suspended"):
             status = "⛔ SUSPENDED"
             suspended += 1
@@ -1479,10 +1453,8 @@ async def my_vps(ctx):
             running += 1
         else:
             status = "🔴 STOPPED"
-
         if vps.get("whitelisted"):
             whitelisted += 1
-
         free_tag = " 🎁 FREE" if vps.get("is_free") else ""
         vps_cards.append(
             f"**{i}.** `{vps['container_name']}`{free_tag}\n"
@@ -1501,22 +1473,16 @@ async def my_vps(ctx):
         ),
         inline=True
     )
-
     embed.add_field(
         name="⚡ Quick Actions",
-        value=(
-            f"`{PREFIX}manage`\n"
-            f"`{PREFIX}status`"
-        ),
+        value=f"`{PREFIX}manage`\n`{PREFIX}status`",
         inline=True
     )
-
     embed.add_field(
         name="🧭 Tip",
         value="Use **manage** to control your VPS",
         inline=True
     )
-
     vps_text = "\n\n".join(vps_cards)
     for i in range(0, len(vps_text), 1024):
         embed.add_field(
@@ -1524,10 +1490,8 @@ async def my_vps(ctx):
             value=vps_text[i:i + 1024],
             inline=False
         )
-
     embed.set_footer(text=f"{BOT_NAME} • VPS Control Panel")
     embed.timestamp = ctx.message.created_at
-
     await ctx.send(embed=embed)
 
 @bot.command(name='lxc-list')
@@ -1611,10 +1575,11 @@ class OSSelectView(discord.ui.View):
             await apply_lxc_config(container_name, self.node_id)
             await safe_start_container(container_name, self.node_id)
             await apply_internal_permissions(container_name, self.node_id)
-            
-            root_password = await setup_ssh_access(container_name, self.node_id, user_id, vps_count, config_str)
+
+            # ===== CHANGED: pass is_free=False (paid VPS) =====
+            root_password = await setup_ssh_access(container_name, self.node_id, user_id, vps_count, config_str, is_free=False)
             pinggy_address = await establish_pinggy_tunnel(container_name, self.node_id)
-            
+
             vps_info = {
                 "container_name": container_name,
                 "node_id": self.node_id,
@@ -1712,11 +1677,14 @@ class ReinstallOSSelectView(discord.ui.View):
             await apply_lxc_config(self.container_name, self.node_id)
             await execute_lxc(self.container_name, f"start {self.container_name}", node_id=self.node_id)
             await apply_internal_permissions(self.container_name, self.node_id)
-            
+
             config_str = f"{self.ram_gb}GB RAM / {self.cpu} CPU / {self.storage_gb}GB Disk"
-            root_password = await setup_ssh_access(self.container_name, self.node_id, self.owner_id, self.actual_idx + 1, config_str)
+            # ===== CHANGED: preserve the free/paid status of this VPS on reinstall =====
+            target_vps_pre = vps_data[self.owner_id][self.actual_idx]
+            was_free = target_vps_pre.get("is_free", False)
+            root_password = await setup_ssh_access(self.container_name, self.node_id, self.owner_id, self.actual_idx + 1, config_str, is_free=was_free)
             pinggy_address = await establish_pinggy_tunnel(self.container_name, self.node_id)
-            
+
             target_vps = vps_data[self.owner_id][self.actual_idx]
             target_vps["os_version"] = os_version
             target_vps["status"] = "running"
@@ -1726,7 +1694,7 @@ class ReinstallOSSelectView(discord.ui.View):
             target_vps["pinggy_address"] = pinggy_address
             target_vps["config"] = config_str
             save_vps_data()
-            
+
             success_embed = create_success_embed("Reinstall Complete", f"VPS `{self.container_name}` has been successfully reinstalled!")
             add_field(success_embed, "Resources", f"**RAM:** {self.ram_gb}GB\n**CPU:** {self.cpu} Cores\n**Storage:** {self.storage_gb}GB", False)
             add_field(success_embed, "OS", os_version, True)
@@ -2717,7 +2685,6 @@ async def delete_vps(ctx, user: discord.Member, vps_number: int, *, reason: str 
 @bot.command(name='reset-free-claim')
 @is_main_admin()
 async def reset_free_claim(ctx, user: discord.Member):
-    """Main admin only: reset a user's free-VPS claim so they can claim again."""
     user_id = str(user.id)
     if not has_claimed_free_vps(user_id):
         await ctx.send(embed=create_info_embed("No Claim Found", f"{user.mention} has not claimed a free VPS."))
@@ -3602,7 +3569,7 @@ async def clone_vps(ctx, container_name: str, new_name: str = None):
         new_vps['created_at'] = datetime.now().isoformat()
         new_vps['shared_with'] = []
         new_vps['id'] = None
-        new_vps['is_free'] = False  # clones are not free-claimed
+        new_vps['is_free'] = False
         vps_data[user_id].append(new_vps)
         save_vps_data()
         embed = create_success_embed("VPS Cloned", f"Successfully cloned VPS `{container_name}` to `{new_name}`")
